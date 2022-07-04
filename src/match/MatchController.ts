@@ -30,8 +30,12 @@ export class MatchController {
     ) {}
 
     like = async ctx => {
+        console.log(ctx);
         try {
             if (!(await this.auth(ctx))) return;
+
+            await ctx.editMessageText(ctx.update.callback_query.message.text + "\n\n" + MatchMessage.LIKED, {parse_mode: "HTML"});
+            await ctx.editMessageReplyMarkup(Markup.removeKeyboard());
 
             const targetId = `${ctx.match.input}`.replace(`${MatchAction.MATCH_LIKE}#`, "");
             const me = await this.userService.get(ctx.from.id);
@@ -52,6 +56,9 @@ export class MatchController {
     dislike = async ctx => {
         try {
             if (!(await this.auth(ctx))) return;
+
+            await ctx.editMessageText(ctx.update.callback_query.message.text + "\n\n" + MatchMessage.DISLIKED, {parse_mode: "HTML"});
+            await ctx.editMessageReplyMarkup(Markup.removeKeyboard());
 
             const targetId = `${ctx.match.input}`.replace(`${MatchAction.MATCH_DISLIKE}#`, "");
             await this.matchService.vote(ctx.from.id, targetId, false);
