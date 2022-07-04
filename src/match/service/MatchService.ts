@@ -59,7 +59,6 @@ export class MatchService {
     async vote(userId: string, targetId: string, like: boolean): Promise<boolean> {
         const recentVotedIds = await this.recentVotedIds(userId);
         const notPermittedIds = await this.notPermittedIds();
-        console.log("notPermittedIds", notPermittedIds);
 
         if (notPermittedIds.includes(targetId)) {
             return false;
