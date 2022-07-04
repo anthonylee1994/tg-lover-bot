@@ -16,13 +16,11 @@ export class MatchService {
     ) {}
 
     async recentLikedUsers(userId: string): Promise<UserView[]> {
-        const notPermittedIds = await MatchService.notPermittedIds();
-
         const targetIds = await MatchService.matchRepository
             .pluck("target_id")
             .where({user_id: userId, like: true})
             .andWhere("created_at", ">", db.raw("'now'::timestamp - '1 month'::interval"))
-            .andWhere("target_id", "NOT IN", notPermittedIds)
+            .andWhere("target_id", "NOT IN", db.raw(this.notPermittedIdsQuery))
             .orderBy("created_at", "desc")
             .limit(5);
 
@@ -32,14 +30,12 @@ export class MatchService {
     }
 
     async recentLikedMe(userId: string): Promise<UserView[]> {
-        const notPermittedIds = await MatchService.notPermittedIds();
-        const bidirectionalMatchedIds = await MatchService.bidirectionalMatchedIds(userId);
-
         const likedMeIds = await MatchService.matchRepository
             .pluck("user_id")
             .where({target_id: userId, like: true})
             .andWhere("created_at", ">", db.raw("'now'::timestamp - '1 month'::interval"))
-            .andWhere("user_id", "NOT IN", [...notPermittedIds, ...bidirectionalMatchedIds])
+            .andWhere("user_id", "NOT IN", db.raw(this.notPermittedIdsQuery))
+            .andWhere("user_id", "NOT IN", db.raw(this.bidirectionalMatchedIdsQuery, [userId]))
             .orderBy("created_at", "desc")
             .limit(5);
 
@@ -49,14 +45,11 @@ export class MatchService {
     }
 
     async bidirectionalMatchedUsers(userId: string): Promise<UserView[]> {
-        const notPermittedIds = await MatchService.notPermittedIds();
-        const targetIds = await MatchService.matchRepository.pluck("target_id").where({user_id: userId, like: true});
-
         const userIds = await MatchService.matchRepository
             .pluck("user_id")
             .where({target_id: userId, like: true})
-            .andWhere("user_id", "IN", targetIds)
-            .andWhere("user_id", "NOT IN", notPermittedIds)
+            .andWhere("user_id", "IN", db.raw(`SELECT target_id FROM matches WHERE user_id = ? AND "like" = true`, [userId]))
+            .andWhere("user_id", "NOT IN", db.raw(this.notPermittedIdsQuery))
             .orderBy("created_at", "desc")
             .limit(5);
 
@@ -64,20 +57,21 @@ export class MatchService {
     }
 
     async vote(userId: string, targetId: string, like: boolean): Promise<boolean> {
-        const recentMatchIds = await MatchService.recentVotedIds(userId);
-        const notPermittedIds = await MatchService.notPermittedIds();
+        const recentVotedIds = await this.recentVotedIds(userId);
+        const notPermittedIds = await this.notPermittedIds();
+        console.log("notPermittedIds", notPermittedIds);
 
         if (notPermittedIds.includes(targetId)) {
             return false;
         }
 
-        if (recentMatchIds.includes(targetId)) {
+        if (recentVotedIds.includes(targetId)) {
             await MatchService.matchRepository.update({like}).where({user_id: userId, target_id: targetId}).andWhere("created_at", ">", db.raw("'now'::timestamp - '1 month'::interval"));
         } else {
             await MatchService.matchRepository.insert({user_id: userId, target_id: targetId, like});
         }
 
-        const bidirectionalMatchIds = await MatchService.bidirectionalMatchedIds(userId);
+        const bidirectionalMatchIds = await this.bidirectionalMatchedIds(userId);
 
         return bidirectionalMatchIds.includes(targetId);
     }
@@ -87,17 +81,16 @@ export class MatchService {
 
         if (!currentUser) return null;
 
-        const recentMatchedIds = await MatchService.recentVotedIds(userId);
-        const bidirectionalMatchedIds = await MatchService.bidirectionalMatchedIds(userId);
-        const notPermittedIds = await MatchService.notPermittedIds();
-
         const luckyPickQuery = MatchService.userRepository.select<User[]>();
         MatchService.filterGender(luckyPickQuery, currentUser.gender!, currentUser.filterGender!);
 
         if (currentUser.filterGoalRelationship) luckyPickQuery.andWhere("goal_relationship", currentUser.goalRelationship);
         luckyPickQuery.andWhereBetween("age", [currentUser.filterAgeLowerBound!, currentUser.filterAgeUpperBound!]);
         luckyPickQuery.andWhereBetween("height", [currentUser.filterHeightLowerBound!, currentUser.filterHeightUpperBound!]);
-        luckyPickQuery.andWhere("telegram_id", "NOT IN", [userId, ...recentMatchedIds, ...bidirectionalMatchedIds, ...notPermittedIds]);
+        luckyPickQuery.andWhere("telegram_id", "<>", userId);
+        luckyPickQuery.andWhere("telegram_id", "NOT IN", db.raw(this.recentVotedIdsQuery, [userId]));
+        luckyPickQuery.andWhere("telegram_id", "NOT IN", db.raw(this.bidirectionalMatchedIdsQuery, [userId]));
+        luckyPickQuery.andWhere("telegram_id", "NOT IN", db.raw(this.notPermittedIdsQuery));
         luckyPickQuery.orderByRaw("RANDOM()");
         luckyPickQuery.limit(1);
         const pickedUser = await luckyPickQuery.first();
@@ -119,21 +112,19 @@ export class MatchService {
         }
     }
 
-    private static async notPermittedIds(): Promise<string[]> {
-        return MatchService.userRepository.pluck("telegram_id").where({blocked: true}).orWhere({username: null}).orWhere({registered: false});
+    private async notPermittedIds(): Promise<string[]> {
+        const result = await db.raw(this.notPermittedIdsQuery);
+        return result.rows.map(r => r.telegram_id);
     }
 
-    private static async recentVotedIds(userId: string): Promise<string[]> {
-        return MatchService.matchRepository.pluck("target_id").where({user_id: userId}).andWhere("created_at", ">", db.raw("'now'::timestamp - '1 month'::interval"));
+    private async recentVotedIds(userId: string): Promise<string[]> {
+        const result = await db.raw(this.recentVotedIdsQuery, [userId]);
+        return result.rows.map(r => r.target_id);
     }
 
-    private static async bidirectionalMatchedIds(userId: string): Promise<string[]> {
-        return MatchService.matchRepository
-            .pluck("target_id")
-            .distinct()
-            .from("matches AS m1")
-            .where({user_id: userId, like: true})
-            .andWhere("target_id", "IN", MatchService.matchRepository.select("user_id").from("matches AS m2").where({target_id: userId, like: true}));
+    private async bidirectionalMatchedIds(userId: string): Promise<string[]> {
+        const result = await db.raw(this.bidirectionalMatchedIdsQuery, [userId]);
+        return result.rows.map(r => r.target_id);
     }
 
     private static get userRepository() {
@@ -143,4 +134,10 @@ export class MatchService {
     private static get matchRepository() {
         return db.table("matches");
     }
+
+    private recentVotedIdsQuery = "SELECT target_id FROM matches WHERE user_id= ? AND created_at > 'now'::timestamp - '1 month'::interval";
+
+    private notPermittedIdsQuery = "SELECT telegram_id FROM users WHERE blocked = true OR username IS NULL OR registered IS false";
+
+    private bidirectionalMatchedIdsQuery = `SELECT DISTINCT target_id FROM matches AS m1 WHERE user_id = ? AND "like" = true AND target_id IN (SELECT user_id FROM matches AS m2 WHERE target_id = m1.user_id AND "like" = true)`;
 }
